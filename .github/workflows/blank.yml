@@ -1,0 +1,736 @@
+name: PC criado pelo @alves7.pcm
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_number:
+        description: "Número da instância"
+        required: true
+        default: "1"
+
+permissions:
+  contents: write
+
+jobs:
+
+  deploy-rdp:
+
+    runs-on: windows-2022
+    timeout-minutes: 360
+
+    steps:
+
+      # ============================================================
+      # 1. BAIXAR O REPOSITÓRIO
+      # ============================================================
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+
+      # ============================================================
+      # 2. PREPARAR WINDOWS
+      # ============================================================
+
+      - name: Prepare Windows
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host "========================================"
+          Write-Host "PREPARING WINDOWS RUNNER"
+          Write-Host "========================================"
+
+          Write-Host "Computer name:"
+          Write-Host $env:COMPUTERNAME
+
+          Write-Host ""
+          Write-Host "Windows version:"
+
+          Get-CimInstance Win32_OperatingSystem |
+            Select-Object Caption, Version, OSArchitecture
+
+          Write-Host ""
+          Write-Host "Preparation completed."
+
+
+      # ============================================================
+      # 3. CONFIGURAR USUARIO RDP
+      # ============================================================
+
+      - name: Configure RDP User
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          $username = "Rafael"
+          $password = "P@ssw0rd!"
+
+          Write-Host "========================================"
+          Write-Host "CONFIGURING RDP USER"
+          Write-Host "========================================"
+
+          $securePassword = ConvertTo-SecureString `
+            $password `
+            -AsPlainText `
+            -Force
+
+          $existingUser = Get-LocalUser `
+            -Name $username `
+            -ErrorAction SilentlyContinue
+
+          if ($null -eq $existingUser) {
+
+            Write-Host "Creating user..."
+
+            New-LocalUser `
+              -Name $username `
+              -Password $securePassword `
+              -FullName $username `
+              -Description "RDP User" `
+              -PasswordNeverExpires `
+              -UserMayNotChangePassword `
+              -ErrorAction Stop
+
+          }
+          else {
+
+            Write-Host "User already exists."
+
+            try {
+
+              Set-LocalUser `
+                -Name $username `
+                -Password $securePassword `
+                -ErrorAction Stop
+
+            }
+            catch {
+
+              Write-Host "Could not reset password."
+            }
+          }
+
+          Write-Host "Adding user to Administrators..."
+
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member $username `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "Adding user to Remote Desktop Users..."
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member $username `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "RDP user configuration completed."
+
+
+      # ============================================================
+      # 4. HABILITAR RDP
+      # ============================================================
+
+      - name: Enable Remote Desktop
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host "========================================"
+          Write-Host "ENABLING REMOTE DESKTOP"
+          Write-Host "========================================"
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0 `
+            -Force
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" `
+            -Value 1 `
+            -Force
+
+          Enable-NetFirewallRule `
+            -DisplayGroup "Remote Desktop" `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "Remote Desktop enabled."
+
+
+      # ============================================================
+      # 5. CORRIGIR ÁUDIO DO WINDOWS E RDP
+      # ============================================================
+
+      - name: Enable Windows Audio and RDP Audio
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host "========================================"
+          Write-Host "FIXING WINDOWS AUDIO"
+          Write-Host "========================================"
+
+          # --------------------------------------------------------
+          # SERVIÇO WINDOWS AUDIO
+          # --------------------------------------------------------
+
+          Write-Host "Checking Windows Audio service..."
+
+          $audioService = Get-Service `
+            -Name "Audiosrv" `
+            -ErrorAction SilentlyContinue
+
+          if ($null -ne $audioService) {
+
+            Write-Host "Windows Audio service found."
+
+            try {
+
+              Set-Service `
+                -Name "Audiosrv" `
+                -StartupType Automatic `
+                -ErrorAction SilentlyContinue
+
+            }
+            catch {
+
+              Write-Host "Could not change Windows Audio startup type."
+            }
+
+            if ($audioService.Status -ne "Running") {
+
+              Write-Host "Starting Windows Audio..."
+
+              try {
+
+                Start-Service `
+                  -Name "Audiosrv" `
+                  -ErrorAction SilentlyContinue
+
+              }
+              catch {
+
+                Write-Host "Could not start Windows Audio."
+              }
+            }
+            else {
+
+              Write-Host "Windows Audio is already running."
+            }
+
+          }
+          else {
+
+            Write-Host "Windows Audio service was not found." `
+              -ForegroundColor Yellow
+          }
+
+
+          # --------------------------------------------------------
+          # AUDIO ENDPOINT BUILDER
+          # --------------------------------------------------------
+
+          Write-Host "Checking AudioEndpointBuilder..."
+
+          $endpointService = Get-Service `
+            -Name "AudioEndpointBuilder" `
+            -ErrorAction SilentlyContinue
+
+          if ($null -ne $endpointService) {
+
+            try {
+
+              Set-Service `
+                -Name "AudioEndpointBuilder" `
+                -StartupType Automatic `
+                -ErrorAction SilentlyContinue
+
+            }
+            catch {
+
+              Write-Host "Could not configure AudioEndpointBuilder."
+            }
+
+            if ($endpointService.Status -ne "Running") {
+
+              try {
+
+                Start-Service `
+                  -Name "AudioEndpointBuilder" `
+                  -ErrorAction SilentlyContinue
+
+              }
+              catch {
+
+                Write-Host "Could not start AudioEndpointBuilder."
+              }
+            }
+          }
+
+
+          # --------------------------------------------------------
+          # CONFIGURAÇÃO DE ÁUDIO DO RDP
+          # --------------------------------------------------------
+
+          Write-Host "Configuring RDP audio playback..."
+
+          $rdpPolicyPath =
+            "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+
+          if (-not (Test-Path $rdpPolicyPath)) {
+
+            New-Item `
+              -Path $rdpPolicyPath `
+              -Force | Out-Null
+          }
+
+
+          # Permitir reprodução de áudio pelo RDP.
+          #
+          # 0 = permitir
+          # 1 = desabilitar
+          #
+
+          New-ItemProperty `
+            -Path $rdpPolicyPath `
+            -Name "fDisableAudioPlayback" `
+            -PropertyType DWord `
+            -Value 0 `
+            -Force `
+            -ErrorAction SilentlyContinue | Out-Null
+
+
+          # Permitir captura de áudio pelo RDP.
+          #
+
+          New-ItemProperty `
+            -Path $rdpPolicyPath `
+            -Name "fDisableAudioCapture" `
+            -PropertyType DWord `
+            -Value 0 `
+            -Force `
+            -ErrorAction SilentlyContinue | Out-Null
+
+
+          # --------------------------------------------------------
+          # CONFIGURAÇÃO DO TERMINAL SERVER
+          # --------------------------------------------------------
+
+          $terminalServerPath =
+            "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
+
+          if (Test-Path $terminalServerPath) {
+
+            Write-Host "Terminal Server configuration found."
+          }
+
+
+          # --------------------------------------------------------
+          # VERIFICAR DISPOSITIVOS DE ÁUDIO
+          # --------------------------------------------------------
+
+          Write-Host ""
+          Write-Host "Checking audio devices..."
+
+          try {
+
+            $audioDevices = Get-PnpDevice `
+              -Class "MEDIA" `
+              -ErrorAction SilentlyContinue
+
+            if ($null -eq $audioDevices) {
+
+              Write-Host "No MEDIA audio devices were detected." `
+                -ForegroundColor Yellow
+
+            }
+            else {
+
+              foreach ($device in $audioDevices) {
+
+                Write-Host (
+                  "{0} | Status: {1}" -f
+                  $device.FriendlyName,
+                  $device.Status
+                )
+              }
+            }
+
+          }
+          catch {
+
+            Write-Host "Could not enumerate audio devices."
+          }
+
+
+          # --------------------------------------------------------
+          # VERIFICAR SERVIÇOS
+          # --------------------------------------------------------
+
+          Write-Host ""
+          Write-Host "Audio service status:"
+
+          Get-Service `
+            -Name "Audiosrv","AudioEndpointBuilder" `
+            -ErrorAction SilentlyContinue |
+            Select-Object Name, Status, StartType
+
+          Write-Host ""
+          Write-Host "Windows/RDP audio configuration completed."
+
+
+      # ============================================================
+      # 6. INSTALAR TAILSCALE
+      # ============================================================
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "INSTALLING TAILSCALE"
+          Write-Host "========================================"
+
+          $tailscaleUrl =
+            "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+
+          $installer =
+            "$env:TEMP\tailscale.msi"
+
+          Invoke-WebRequest `
+            -Uri $tailscaleUrl `
+            -OutFile $installer
+
+          Write-Host "Installing MSI..."
+
+          $process = Start-Process `
+            -FilePath "msiexec.exe" `
+            -ArgumentList "/i `"$installer`" /qn /norestart" `
+            -Wait `
+            -PassThru
+
+          if ($process.ExitCode -ne 0) {
+
+            throw "Tailscale installation failed. Exit code: $($process.ExitCode)"
+          }
+
+          Write-Host "Tailscale installation completed."
+
+
+      # ============================================================
+      # 7. CONECTAR TAILSCALE
+      # ============================================================
+
+      - name: Connect Tailscale
+        shell: powershell
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "========================================"
+          Write-Host "CONNECTING TAILSCALE"
+          Write-Host "========================================"
+
+          $authKey = $env:TAILSCALE_AUTH_KEY
+
+          if ([string]::IsNullOrWhiteSpace($authKey)) {
+
+            throw "TAILSCALE_AUTH_KEY secret is empty."
+          }
+
+          $tailscale =
+            "C:\Program Files\Tailscale\tailscale.exe"
+
+          if (-not (Test-Path $tailscale)) {
+
+            throw "Tailscale executable was not found."
+          }
+
+          $hostname =
+            "enigmano-${{ github.run_id }}"
+
+          Write-Host "Hostname: $hostname"
+
+          & $tailscale up `
+            "--authkey=$authKey" `
+            "--hostname=$hostname"
+
+          if ($LASTEXITCODE -ne 0) {
+
+            throw "Tailscale failed to connect. Exit code: $LASTEXITCODE"
+          }
+
+          Write-Host "Tailscale connected."
+
+          Start-Sleep -Seconds 5
+
+
+      # ============================================================
+      # 8. OBTER IP TAILSCALE
+      # ============================================================
+
+      - name: Get Tailscale IP
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host "========================================"
+          Write-Host "GETTING TAILSCALE IP"
+          Write-Host "========================================"
+
+          $tailscale =
+            "C:\Program Files\Tailscale\tailscale.exe"
+
+          $ip = & $tailscale ip -4 2>$null |
+            Select-Object -First 1
+
+          if ([string]::IsNullOrWhiteSpace($ip)) {
+
+            Write-Host "Could not obtain Tailscale IPv4." `
+              -ForegroundColor Yellow
+
+          }
+          else {
+
+            $ip = $ip.Trim()
+
+            Write-Host "Tailscale IPv4:"
+            Write-Host $ip
+
+            "TAILSCALE_IP=$ip" |
+              Out-File `
+                -FilePath $env:GITHUB_ENV `
+                -Append `
+                -Encoding utf8
+          }
+
+
+      # ============================================================
+      # 9. VERIFICAR RDP E ÁUDIO NOVAMENTE
+      # ============================================================
+
+      - name: Verify RDP and Audio
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host "========================================"
+          Write-Host "FINAL RDP AND AUDIO CHECK"
+          Write-Host "========================================"
+
+          # --------------------------------------------------------
+          # RDP
+          # --------------------------------------------------------
+
+          $rdpValue = Get-ItemPropertyValue `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -ErrorAction SilentlyContinue
+
+          if ($rdpValue -eq 0) {
+
+            Write-Host "RDP is ENABLED."
+
+          }
+          else {
+
+            Write-Host "RDP is DISABLED." `
+              -ForegroundColor Yellow
+          }
+
+
+          # --------------------------------------------------------
+          # PORTA 3389
+          # --------------------------------------------------------
+
+          $rdpPort = Get-NetTCPConnection `
+            -LocalPort 3389 `
+            -State Listen `
+            -ErrorAction SilentlyContinue
+
+          if ($null -ne $rdpPort) {
+
+            Write-Host "RDP port 3389 is listening."
+
+          }
+          else {
+
+            Write-Host "RDP port 3389 is not listening." `
+              -ForegroundColor Yellow
+          }
+
+
+          # --------------------------------------------------------
+          # WINDOWS AUDIO
+          # --------------------------------------------------------
+
+          $audio = Get-Service `
+            -Name "Audiosrv" `
+            -ErrorAction SilentlyContinue
+
+          if ($null -ne $audio) {
+
+            Write-Host "Windows Audio: $($audio.Status)"
+
+          }
+          else {
+
+            Write-Host "Windows Audio service not found." `
+              -ForegroundColor Yellow
+          }
+
+
+          # --------------------------------------------------------
+          # AUDIO ENDPOINT BUILDER
+          # --------------------------------------------------------
+
+          $endpoint = Get-Service `
+            -Name "AudioEndpointBuilder" `
+            -ErrorAction SilentlyContinue
+
+          if ($null -ne $endpoint) {
+
+            Write-Host "AudioEndpointBuilder: $($endpoint.Status)"
+
+          }
+
+
+          # --------------------------------------------------------
+          # DISPOSITIVOS
+          # --------------------------------------------------------
+
+          Write-Host ""
+          Write-Host "Audio devices:"
+
+          try {
+
+            Get-PnpDevice `
+              -Class "MEDIA" `
+              -ErrorAction SilentlyContinue |
+              Select-Object `
+                FriendlyName,
+                Status,
+                InstanceId
+
+          }
+          catch {
+
+            Write-Host "Unable to enumerate audio devices."
+          }
+
+
+      # ============================================================
+      # 10. PREPARAR ESTADO
+      # ============================================================
+
+      - name: Prepare PC State
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host "========================================"
+          Write-Host "PREPARING PC STATE"
+          Write-Host "========================================"
+
+          $stateDirectory = ".pc-state"
+          $stateFile = ".pc-state\state.json"
+
+          if (-not (Test-Path $stateDirectory)) {
+
+            New-Item `
+              -ItemType Directory `
+              -Path $stateDirectory `
+              -Force | Out-Null
+          }
+
+          if (-not (Test-Path $stateFile)) {
+
+            $initialState = @{
+              applications = @()
+              updated = (Get-Date).ToUniversalTime().ToString("o")
+            }
+
+            $initialState |
+              ConvertTo-Json -Depth 10 |
+              Set-Content `
+                -Path $stateFile `
+                -Encoding UTF8
+
+            Write-Host "Initial state file created."
+
+          }
+          else {
+
+            Write-Host "Existing state file found."
+          }
+
+
+      # ============================================================
+      # 11. DETECTAR APLICATIVOS
+      # ============================================================
+
+      - name: Detect User Installed Applications
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host "========================================"
+          Write-Host "DETECTING INSTALLED APPLICATIONS"
+          Write-Host "========================================"
+
+          $applications = @()
+
+          $registryPaths = @(
+            "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
+          )
+
+          foreach ($registryPath in $registryPaths) {
+
+            try {
+
+              $items = Get-ItemProperty `
+                -Path $registryPath `
+                -ErrorAction SilentlyContinue
+
+              foreach ($application in $items) {
+
+                $appName =
+                  [string]$application.DisplayName
+
+                $appVersion =
+                  [string]$application.DisplayVersion
+
+                if ([string]::IsNullOrWhiteSpace($appName)) {
+                  continue
+                }
+
+                $existing =
+                  $applications |
+                  Where-Object {
+                    $_.Name -eq $appName
+                  }
+
+                if ($null -eq $existing) {
+
+                  $applications += [PSCustomObject]@{
+                    Name = $appName
+                    Version = $appVersion
+                    WingetId = ""
+                  }
+                }
+              }
+
+            }
+            catch {
+
+              Write-Hos
